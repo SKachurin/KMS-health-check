@@ -1,0 +1,34 @@
+version: "3.9"
+services:
+  kms-healthcheck:
+    build: .
+    image: kms-healthcheck:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KMS1_URL: ${KMS1_URL}
+      KMS1_REGION: ${KMS1_REGION}
+      KMS1_KEY_ID: ${KMS1_KEY_ID}
+      KMS1_ACCESS_KEY_ID: ${KMS1_ACCESS_KEY_ID}
+      KMS1_SECRET_ACCESS_KEY: ${KMS1_SECRET_ACCESS_KEY}
+      KMS_HEALTH_SECRET: ${KMS_HEALTH_SECRET}
+      REDIS_URL: ${REDIS_URL}
+      LOCK_TTL: ${LOCK_TTL:-5m}
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 2s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
