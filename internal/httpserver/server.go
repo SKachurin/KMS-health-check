@@ -1,4 +1,3 @@
-// internal/httpserver/server.go
 package httpserver
 
 import (
@@ -24,7 +23,6 @@ type Server struct {
 	secret []byte
 }
 
-// NOTE: Start now receives the locker directly (not the raw redis client).
 func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, clients map[string]kmsclient.Client) {
 	s := &Server{
 		cfg:    cfg,
@@ -34,11 +32,14 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 	}
 
 	mux := http.NewServeMux()
-        // ---- health probe (no auth) ----
-    mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-       w.WriteHeader(http.StatusOK)
-       _, _ = w.Write([]byte("ok"))
-    })
+
+	// health probe (no auth)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// API (with auth)
 	mux.HandleFunc("/kms/wrap", s.withAuth(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withAuth(s.unwrap))
 
@@ -57,6 +58,9 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1 MiB cap to avoid abuse
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 		ts := r.Header.Get("X-Ts")
 		nonce := r.Header.Get("X-Nonce")
 		sig := r.Header.Get("X-Sig")
@@ -71,7 +75,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// anti-replay on nonce (no caching of auth; one-shot)
+		// anti-replay: nonce is one-shot
 		if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
 			http.Error(w, "replay", http.StatusForbidden)
 			return
@@ -108,17 +112,22 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ids := in.KMSIDs
-    if len(ids) == 0 {
-        ids = make([]string, 0, len(s.kms))
-        for id := range s.kms { ids = append(ids, id) } // -> ["kms1"]
-    }
+	if len(ids) == 0 {
+		ids = make([]string, 0, len(s.kms))
+		for id := range s.kms {
+			ids = append(ids, id) // e.g., ["kms1"]
+		}
+	}
 
 	type res struct {
 		Ok   bool   `json:"ok"`
 		WB64 string `json:"w_b64,omitempty"`
 	}
 	out := map[string]res{}
-	type pair struct{ id string; val res }
+	type pair struct {
+		id  string
+		val res
+	}
 	ch := make(chan pair, len(ids))
 
 	for _, id := range ids {
@@ -159,7 +168,7 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TTL-based deny window (default 5m), keyed by (user_id, answer_fp)
+	// TTL-based deny window (e.g., 5m), keyed by (user_id, answer_fp)
 	lockKey := "lock:unwrap:" + strconv.Itoa(in.UserID) + ":" + in.AnswerFP
 	if ok, _ := s.locker.TryAcquire(r.Context(), lockKey); !ok {
 		http.Error(w, "locked", http.StatusTooManyRequests) // 429
@@ -168,10 +177,17 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 
 	ids := in.KMSIDs
 	if len(ids) == 0 {
-		ids = []string{"kms1", "kms2", "kms3"}
+		ids = make([]string, 0, len(s.kms))
+		for id := range s.kms {
+			ids = append(ids, id)
+		}
 	}
 
-	type pr struct{ id string; ok bool; dek string }
+	type pr struct {
+		id  string
+		ok  bool
+		dek string
+	}
 	ch := make(chan pr, len(ids))
 
 	for _, id := range ids {

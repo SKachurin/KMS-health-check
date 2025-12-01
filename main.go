@@ -32,5 +32,5 @@ func main() {
     }
 
     go httpserver.Start(ctx, cfg, locker, clients)
-    health.StartLoop(ctx, cfg, []kmsclient.Client{kms1})
+    health.StartLoop(ctx, cfg, clients)
 }
