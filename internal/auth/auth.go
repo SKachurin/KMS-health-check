@@ -31,10 +31,18 @@ func VerifyMAC(givenHex string, body []byte, ts string, nonce string, secret []b
 	if err != nil { return errors.New("bad ts") }
 	if parsed.After(now.Add(skew)) || parsed.Before(now.Add(-skew)) { return errors.New("stale ts") }
 
-	want := ComputeMAC(body, ts, nonce, secret)
-	got, err := hex.DecodeString(givenHex)
-	if err != nil { return errors.New("bad mac encoding") }
-	wantb, _ := hex.DecodeString(want)
-	if !hmac.Equal(got, wantb) { return errors.New("mac mismatch") }
-	return nil
+    mac := hmac.New(sha256.New, secret)
+    mac.Write([]byte(ts))
+    mac.Write([]byte("\n"))
+    mac.Write([]byte(nonce))
+    mac.Write([]byte("\n"))
+    mac.Write(rawBody)
+    want := mac.Sum(nil)
+
+    got, err := hex.DecodeString(sigHex)
+    if err != nil { return errors.New("bad sig hex") }
+    if !hmac.Equal(got, want) {
+        return errors.New("sig mismatch")
+    }
+    return nil
 }

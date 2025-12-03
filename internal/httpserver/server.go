@@ -57,32 +57,38 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// 1 MiB cap to avoid abuse
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+    return func(w http.ResponseWriter, r *http.Request) {
+        ts := r.Header.Get("X-Ts")
+        nonce := r.Header.Get("X-Nonce")
+        sig := r.Header.Get("X-Sig")
+        if ts == "" || nonce == "" || sig == "" {
+            http.Error(w, "auth headers missing", http.StatusUnauthorized)
+            return
+        }
 
-		ts := r.Header.Get("X-Ts")
-		nonce := r.Header.Get("X-Nonce")
-		sig := r.Header.Get("X-Sig")
-		if ts == "" || nonce == "" || sig == "" {
-			http.Error(w, "auth headers missing", http.StatusUnauthorized)
-			return
-		}
+        // Read the RAW body bytes exactly as sent by the client.
+        raw, err := io.ReadAll(r.Body)
+        if err != nil {
+            http.Error(w, "read body", http.StatusBadRequest)
+            return
+        }
+        // Restore the body for the next handler to decode.
+        r.Body = io.NopCloser(bytes.NewReader(raw))
 
-		body := jsonCanonical(r)
-		if err := auth.VerifyMAC(sig, body, ts, nonce, s.secret, time.Now(), s.cfg.Skew); err != nil {
-			http.Error(w, "bad signature", http.StatusForbidden)
-			return
-		}
+        // Verify HMAC over the RAW bytes (no re-marshaling / no reordering).
+        if err := auth.VerifyMAC(sig, raw, ts, nonce, []byte(s.cfg.HealthSecret), time.Now(), s.cfg.Skew); err != nil {
+            http.Error(w, "bad signature", http.StatusForbidden)
+            return
+        }
 
-		// anti-replay: nonce is one-shot
-		if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
-			http.Error(w, "replay", http.StatusForbidden)
-			return
-		}
+        // One-time nonce (anti-replay)
+        if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
+            http.Error(w, "replay", http.StatusForbidden)
+            return
+        }
 
-		next(w, r)
-	}
+        next(w, r)
+    }
 }
 
 func jsonCanonical(r *http.Request) []byte {
