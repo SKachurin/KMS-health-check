@@ -33,11 +33,13 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 	}
 
 	mux := http.NewServeMux()
-	// health probe
+
+	// liveness probe
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
 	mux.HandleFunc("/kms/wrap", s.withAuth(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withAuth(s.unwrap))
 
@@ -60,26 +62,27 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		nonce := r.Header.Get("X-Nonce")
 		sig := r.Header.Get("X-Sig")
 		if ts == "" || nonce == "" || sig == "" {
-			http.Error(w, "auth headers missing", http.StatusUnauthorized)
+			jsonError(w, http.StatusUnauthorized, "auth_headers_missing", nil)
 			return
 		}
 
-		// Read RAW body exactly as sent, then restore it for the handler.
+		// Read raw body exactly as sent, then restore it for the next handler.
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
+			jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "read body error"})
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 
-		if err := auth.VerifyMAC(sig, raw, ts, nonce, []byte(s.cfg.HealthSecret), time.Now(), s.cfg.Skew); err != nil {
-			http.Error(w, "bad signature", http.StatusForbidden)
+		// Verify HMAC over (ts "\n" nonce "\n" rawBody)
+		if err := auth.VerifyMAC(sig, raw, ts, nonce, s.secret, time.Now(), s.cfg.Skew); err != nil {
+			jsonError(w, http.StatusForbidden, "bad_signature", map[string]any{"reason": err.Error()})
 			return
 		}
 
 		// one-time nonce (anti-replay)
 		if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
-			http.Error(w, "replay", http.StatusForbidden)
+			jsonError(w, http.StatusForbidden, "replay_detected", nil)
 			return
 		}
 
@@ -87,7 +90,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// /kms/wrap — fan out to all requested KMS ids, no deny window here
+// /kms/wrap — fan out to requested KMS ids (no deny window here)
 func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		UserID   int      `json:"user_id"`
@@ -97,7 +100,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 		KMSIDs   []string `json:"kms_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "invalid JSON body"})
 		return
 	}
 
@@ -132,6 +135,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 			ch <- pair{id, res{Ok: true, WB64: wB64}}
 		}(id, client)
 	}
+
 	for range ids {
 		p := <-ch
 		out[p.id] = p.val
@@ -151,13 +155,20 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		KMSIDs   []string `json:"kms_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "invalid JSON body"})
 		return
 	}
 
+	// TTL-based deny window (e.g., 5m) keyed by (user_id, answer_fp)
 	lockKey := "lock:unwrap:" + strconv.Itoa(in.UserID) + ":" + in.AnswerFP
 	if ok, _ := s.locker.TryAcquire(r.Context(), lockKey); !ok {
-		http.Error(w, "locked", http.StatusTooManyRequests)
+		retry := int(s.cfg.LockTTL.Seconds())
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		jsonError(w, http.StatusTooManyRequests, "rate_limited", map[string]any{
+			"retry_after_seconds": retry,
+			"key":                 lockKey,
+			"scope":               "user_id+answer_fp",
+		})
 		return
 	}
 
@@ -194,6 +205,7 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		p := <-ch
 		results[p.id] = map[string]bool{"ok": p.ok}
 		if dekOut == "" && p.ok && p.dek != "" {
+			// sanity: must be valid base64 before returning
 			if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
 				dekOut = p.dek
 			}
@@ -205,4 +217,14 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		"dek_b64": dekOut,
 		"results": results,
 	})
+}
+
+func jsonError(w http.ResponseWriter, code int, msg string, extra map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	out := map[string]any{"error": msg}
+	for k, v := range extra {
+		out[k] = v
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
