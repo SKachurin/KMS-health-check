@@ -8,41 +8,42 @@ import (
 	"time"
 )
 
-type Inputs struct {
-	BodyCanonical []byte // canonical JSON bytes (no spaces, fixed order)
-	Timestamp     time.Time
-	Nonce         string
-	Secret        []byte
-	Skew          time.Duration
+// ComputeMAC builds HMAC-SHA256 over: ts + "\n" + nonce + "\n" + rawBody
+func ComputeMAC(rawBody []byte, ts, nonce string, secret []byte) string {
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte(ts))
+	m.Write([]byte("\n"))
+	m.Write([]byte(nonce))
+	m.Write([]byte("\n"))
+	m.Write(rawBody)
+	return hex.EncodeToString(m.Sum(nil))
 }
 
-// Compute HMAC-SHA256(body || "." || ts || "." || nonce)
-func ComputeMAC(body []byte, ts string, nonce string, secret []byte) string {
-	h := hmac.New(sha256.New, secret)
-	h.Write(body)
-	h.Write([]byte(".")); h.Write([]byte(ts))
-	h.Write([]byte(".")); h.Write([]byte(nonce))
-	return hex.EncodeToString(h.Sum(nil))
-}
+// VerifyMAC checks the same scheme and enforces timestamp freshness (RFC3339Nano).
+func VerifyMAC(sigHex string, rawBody []byte, ts, nonce string, secret []byte, now time.Time, skew time.Duration) error {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return errors.New("bad ts")
+	}
+	dt := now.Sub(t)
+	if dt > skew || dt < -skew {
+		return errors.New("ts skew")
+	}
 
-func VerifyMAC(givenHex string, body []byte, ts string, nonce string, secret []byte, now time.Time, skew time.Duration) error {
-	// check ts freshness
-	parsed, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil { return errors.New("bad ts") }
-	if parsed.After(now.Add(skew)) || parsed.Before(now.Add(-skew)) { return errors.New("stale ts") }
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte(ts))
+	m.Write([]byte("\n"))
+	m.Write([]byte(nonce))
+	m.Write([]byte("\n"))
+	m.Write(rawBody)
+	want := m.Sum(nil)
 
-    mac := hmac.New(sha256.New, secret)
-    mac.Write([]byte(ts))
-    mac.Write([]byte("\n"))
-    mac.Write([]byte(nonce))
-    mac.Write([]byte("\n"))
-    mac.Write(rawBody)
-    want := mac.Sum(nil)
-
-    got, err := hex.DecodeString(sigHex)
-    if err != nil { return errors.New("bad sig hex") }
-    if !hmac.Equal(got, want) {
-        return errors.New("sig mismatch")
-    }
-    return nil
+	got, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return errors.New("bad sig hex")
+	}
+	if !hmac.Equal(got, want) {
+		return errors.New("sig mismatch")
+	}
+	return nil
 }
