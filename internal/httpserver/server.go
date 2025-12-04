@@ -1,13 +1,14 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/SKachurin/KMS-health-check/internal/auth"
@@ -32,14 +33,11 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 	}
 
 	mux := http.NewServeMux()
-
-	// health probe (no auth)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	// health probe
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-
-	// API (with auth)
 	mux.HandleFunc("/kms/wrap", s.withAuth(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withAuth(s.unwrap))
 
@@ -57,53 +55,39 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        ts := r.Header.Get("X-Ts")
-        nonce := r.Header.Get("X-Nonce")
-        sig := r.Header.Get("X-Sig")
-        if ts == "" || nonce == "" || sig == "" {
-            http.Error(w, "auth headers missing", http.StatusUnauthorized)
-            return
-        }
+	return func(w http.ResponseWriter, r *http.Request) {
+		ts := r.Header.Get("X-Ts")
+		nonce := r.Header.Get("X-Nonce")
+		sig := r.Header.Get("X-Sig")
+		if ts == "" || nonce == "" || sig == "" {
+			http.Error(w, "auth headers missing", http.StatusUnauthorized)
+			return
+		}
 
-        // Read the RAW body bytes exactly as sent by the client.
-        raw, err := io.ReadAll(r.Body)
-        if err != nil {
-            http.Error(w, "read body", http.StatusBadRequest)
-            return
-        }
-        // Restore the body for the next handler to decode.
-        r.Body = io.NopCloser(bytes.NewReader(raw))
+		// Read RAW body exactly as sent, then restore it for the handler.
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
 
-        // Verify HMAC over the RAW bytes (no re-marshaling / no reordering).
-        if err := auth.VerifyMAC(sig, raw, ts, nonce, []byte(s.cfg.HealthSecret), time.Now(), s.cfg.Skew); err != nil {
-            http.Error(w, "bad signature", http.StatusForbidden)
-            return
-        }
+		if err := auth.VerifyMAC(sig, raw, ts, nonce, []byte(s.cfg.HealthSecret), time.Now(), s.cfg.Skew); err != nil {
+			http.Error(w, "bad signature", http.StatusForbidden)
+			return
+		}
 
-        // One-time nonce (anti-replay)
-        if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
-            http.Error(w, "replay", http.StatusForbidden)
-            return
-        }
+		// one-time nonce (anti-replay)
+		if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
+			http.Error(w, "replay", http.StatusForbidden)
+			return
+		}
 
-        next(w, r)
-    }
+		next(w, r)
+	}
 }
 
-func jsonCanonical(r *http.Request) []byte {
-	defer r.Body.Close()
-	var any map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&any)
-	b, _ := json.Marshal(any) // stable Go JSON
-	r.Body = nopCloser{strings.NewReader(string(b))}
-	return b
-}
-
-type nopCloser struct{ *strings.Reader }
-func (n nopCloser) Close() error { return nil }
-
-// ---------- /kms/wrap (NO deny window here) ----------
+// /kms/wrap — fan out to all requested KMS ids, no deny window here
 func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		UserID   int      `json:"user_id"`
@@ -121,7 +105,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	if len(ids) == 0 {
 		ids = make([]string, 0, len(s.kms))
 		for id := range s.kms {
-			ids = append(ids, id) // e.g., ["kms1"]
+			ids = append(ids, id)
 		}
 	}
 
@@ -130,10 +114,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 		WB64 string `json:"w_b64,omitempty"`
 	}
 	out := map[string]res{}
-	type pair struct {
-		id  string
-		val res
-	}
+	type pair struct{ id string; val res }
 	ch := make(chan pair, len(ids))
 
 	for _, id := range ids {
@@ -160,7 +141,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": out})
 }
 
-// ---------- /kms/unwrap (DENY WINDOW on (user_id, answer_fp)) ----------
+// /kms/unwrap — apply deny window on (user_id, answer_fp)
 func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		UserID   int      `json:"user_id"`
@@ -174,10 +155,9 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TTL-based deny window (e.g., 5m), keyed by (user_id, answer_fp)
 	lockKey := "lock:unwrap:" + strconv.Itoa(in.UserID) + ":" + in.AnswerFP
 	if ok, _ := s.locker.TryAcquire(r.Context(), lockKey); !ok {
-		http.Error(w, "locked", http.StatusTooManyRequests) // 429
+		http.Error(w, "locked", http.StatusTooManyRequests)
 		return
 	}
 
@@ -189,11 +169,7 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type pr struct {
-		id  string
-		ok  bool
-		dek string
-	}
+	type pr struct{ id string; ok bool; dek string }
 	ch := make(chan pr, len(ids))
 
 	for _, id := range ids {
@@ -218,7 +194,6 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		p := <-ch
 		results[p.id] = map[string]bool{"ok": p.ok}
 		if dekOut == "" && p.ok && p.dek != "" {
-			// sanity: ensure it's base64
 			if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
 				dekOut = p.dek
 			}
