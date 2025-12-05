@@ -256,7 +256,7 @@ func (s *Server) kmsHealthCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ReqTimeout)
 	defer cancel()
 
-	statuses := health.CheckOnce(ctx, s.kms)
+	statuses := health.CheckOnce(ctx, s.cfg, s.kms)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
