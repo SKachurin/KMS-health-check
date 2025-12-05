@@ -4,16 +4,34 @@ services:
     image: kms-healthcheck:local
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - /opt/mtls:/certs:ro
     environment:
-      KMS1_URL: ${KMS1_URL}
-      KMS1_REGION: ${KMS1_REGION}
-      KMS1_KEY_ID: ${KMS1_KEY_ID}
-      KMS1_ACCESS_KEY_ID: ${KMS1_ACCESS_KEY_ID}
-      KMS1_SECRET_ACCESS_KEY: ${KMS1_SECRET_ACCESS_KEY}
-      KMS_HEALTH_SECRET: ${KMS_HEALTH_SECRET}
-      REDIS_URL: ${REDIS_URL}
-      LOCK_TTL: ${LOCK_TTL:-5m}
+      # AWS KMS #1
+      KMS1_URL: "${KMS1_URL}"
+      KMS1_REGION: "${KMS1_REGION}"
+      KMS1_KEY_ID: "${KMS1_KEY_ID}"
+      KMS1_ACCESS_KEY_ID: "${KMS1_ACCESS_KEY_ID}"
+      KMS1_SECRET_ACCESS_KEY: "${KMS1_SECRET_ACCESS_KEY}"
+
+      # Redis
+      REDIS_URL: "redis://redis:6379/0"
+
+      # Security (keep for now; you can delete later when mTLS is in)
+      KMS_HEALTH_SECRET: "${KMS_HEALTH_SECRET}"
+
+      # IP allow-list & proxy trust
+      ALLOW_IPS: "${ALLOW_IPS}"     # e.g. "185.229.225.151/32,90.167.0.0/16"
+      TRUST_PROXY: "${TRUST_PROXY}" # "true" if behind nginx/elb that sets X-Forwarded-For
+
+      # Timers
+      LOCK_TTL: "${LOCK_TTL:-5m}"
+      NONCE_TTL: "${NONCE_TTL:-5m}"
+      HEALTH_INTERVAL: "${HEALTH_INTERVAL:-15s}"
+      REQ_TIMEOUT: "${REQ_TIMEOUT:-2s}"
+      SIG_SKEW: "${SIG_SKEW:-60s}"
+
     depends_on:
       - redis
     healthcheck:

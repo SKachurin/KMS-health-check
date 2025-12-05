@@ -3,15 +3,18 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
-	"github.com/SKachurin/KMS-health-check/internal/auth"
 	"github.com/SKachurin/KMS-health-check/internal/config"
 	"github.com/SKachurin/KMS-health-check/internal/kmsclient"
 	"github.com/SKachurin/KMS-health-check/internal/ratelimit"
@@ -21,88 +24,102 @@ type Server struct {
 	cfg    config.Config
 	locker *ratelimit.Locker
 	kms    map[string]kmsclient.Client
-	secret []byte
 }
 
+// Start listener:
+//  - :8443 HTTPS with mutual TLS (client cert required) for /kms/* endpoints
 func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, clients map[string]kmsclient.Client) {
 	s := &Server{
 		cfg:    cfg,
 		kms:    clients,
 		locker: locker,
-		secret: []byte(cfg.HealthSecret),
 	}
 
+	// mux for listener
 	mux := http.NewServeMux()
 
-	// liveness probe
+	// Health probe (no mTLS required on 8080; you can also serve it on 8443)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	mux.HandleFunc("/kms/wrap", s.withAuth(s.wrap))
-	mux.HandleFunc("/kms/unwrap", s.withAuth(s.unwrap))
+	// Wrap/Unwrap behind mTLS + IP allow-list (we check IP inside the handler)
+	// HMAC is completely removed.
+	mux.HandleFunc("/kms/wrap", s.withIPAllowList(s.wrap))
+	mux.HandleFunc("/kms/unwrap", s.withIPAllowList(s.unwrap))
 
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	// --- TLS + mTLS on 8443 ---
+	cert, err := tls.LoadX509KeyPair("/certs/server.crt", "/certs/server.key")
+	if err != nil {
+		log.Fatal("load server cert:", err)
+	}
+	caPEM, err := os.ReadFile("/certs/ca.crt")
+	if err != nil {
+		log.Fatal("read ca:", err)
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		log.Fatal("append CA failed")
+	}
 
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS12,
+	}
+	tlsSrv := &http.Server{
+		Addr:      ":8443",
+		Handler:   mux,
+		TLSConfig: tlsCfg,
+	}
+
+	// graceful shutdown
 	go func() {
 		<-ctx.Done()
-		_ = srv.Shutdown(context.Background())
+		_ = tlsSrv.Shutdown(context.Background())
 	}()
 
-	log.Println("gateway listening :8080")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// run
+	log.Println("mTLS listening :8443 (wrap/unwrap)")
+	if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
-func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
+// withIPAllowList enforces source IP matches Config.AllowedCIDRs (if any).
+// It works for both direct connections and simple L4 forwarding.
+// If you later put a reverse proxy in front, adapt to trust X-Forwarded-For safely.
+func (s *Server) withIPAllowList(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ts := r.Header.Get("X-Ts")
-		nonce := r.Header.Get("X-Nonce")
-		sig := r.Header.Get("X-Sig")
-		if ts == "" || nonce == "" || sig == "" {
-			jsonError(w, http.StatusUnauthorized, "auth_headers_missing", nil)
-			return
-		}
-
-		// Read raw body exactly as sent, then restore it for the next handler.
-		raw, err := io.ReadAll(r.Body)
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
-			jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "read body error"})
+			jsonError(w, http.StatusForbidden, "forbidden", map[string]any{"reason": "bad remote addr"})
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-
-		// Verify HMAC over (ts "\n" nonce "\n" rawBody)
-		if err := auth.VerifyMAC(sig, raw, ts, nonce, s.secret, time.Now(), s.cfg.Skew); err != nil {
-			jsonError(w, http.StatusForbidden, "bad_signature", map[string]any{"reason": err.Error()})
+		ip := net.ParseIP(host)
+		if ip == nil || !s.cfg.IsIPAllowed(ip) {
+			jsonError(w, http.StatusForbidden, "forbidden", map[string]any{"reason": "ip not allowed"})
 			return
 		}
-
-		// one-time nonce (anti-replay)
-		if ok, _ := s.locker.TryAcquire(r.Context(), "seen:"+nonce); !ok {
-			jsonError(w, http.StatusForbidden, "replay_detected", nil)
-			return
-		}
-
 		next(w, r)
 	}
 }
 
-// /kms/wrap — fan out to requested KMS ids (no deny window here)
+// --- WRAP: fan-out to requested KMS ids (no deny window here) ---
 func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
-	var in struct {
+	raw, in, ok := readJSON[struct {
 		UserID   int      `json:"user_id"`
 		DekB64   string   `json:"dek_b64"`
 		HB64     string   `json:"h_b64"`
 		AnswerFP string   `json:"answer_fp"`
 		KMSIDs   []string `json:"kms_ids"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "invalid JSON body"})
+	}](w, r)
+	if !ok {
 		return
 	}
+	_ = raw // kept for parity; not used now
 
 	ids := in.KMSIDs
 	if len(ids) == 0 {
@@ -135,7 +152,6 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 			ch <- pair{id, res{Ok: true, WB64: wB64}}
 		}(id, client)
 	}
-
 	for range ids {
 		p := <-ch
 		out[p.id] = p.val
@@ -145,21 +161,20 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": out})
 }
 
-// /kms/unwrap — apply deny window on (user_id, answer_fp)
+// --- UNWRAP: deny-window (LockTTL) on (user_id, answer_fp) ---
 func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
-	var in struct {
+	raw, in, ok := readJSON[struct {
 		UserID   int      `json:"user_id"`
 		HB64     string   `json:"h_b64"`
 		AnswerFP string   `json:"answer_fp"`
 		WB64     string   `json:"w_b64"`
 		KMSIDs   []string `json:"kms_ids"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "invalid JSON body"})
+	}](w, r)
+	if !ok {
 		return
 	}
+	_ = raw
 
-	// TTL-based deny window (e.g., 5m) keyed by (user_id, answer_fp)
 	lockKey := "lock:unwrap:" + strconv.Itoa(in.UserID) + ":" + in.AnswerFP
 	if ok, _ := s.locker.TryAcquire(r.Context(), lockKey); !ok {
 		retry := int(s.cfg.LockTTL.Seconds())
@@ -205,7 +220,7 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		p := <-ch
 		results[p.id] = map[string]bool{"ok": p.ok}
 		if dekOut == "" && p.ok && p.dek != "" {
-			// sanity: must be valid base64 before returning
+			// sanity
 			if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
 				dekOut = p.dek
 			}
@@ -219,6 +234,7 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// helpers
 func jsonError(w http.ResponseWriter, code int, msg string, extra map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -227,4 +243,22 @@ func jsonError(w http.ResponseWriter, code int, msg string, extra map[string]any
 		out[k] = v
 	}
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func readJSON[T any](w http.ResponseWriter, r *http.Request) ([]byte, T, bool) {
+	var zero T
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "read body failed"})
+		return nil, zero, false
+	}
+	defer r.Body.Close()
+	var in T
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "invalid JSON"})
+		return nil, zero, false
+	}
+	return raw, in, true
 }
