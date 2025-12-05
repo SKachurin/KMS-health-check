@@ -1,8 +1,10 @@
 package config
 
 import (
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,17 +25,23 @@ type Config struct {
 	// --- Timing knobs ---
 	HealthInterval time.Duration
 	ReqTimeout     time.Duration
-	Skew           time.Duration // unused now; kept for future
-	NonceTTL       time.Duration // unused now; kept for future
+	Skew           time.Duration // kept for future use
+	NonceTTL       time.Duration // kept for future use
 	LockTTL        time.Duration // deny window for unwrap (user_id, answer_fp)
 
 	// --- Health probe content (for wrap/unwrap echo) ---
-	HealthProbeDEK      string // plaintext DEK to echo (base64-encoded internally)
-	HealthProbeAnswerFP string // answer_fp used in EncryptionContext
-	HealthProbeUserID   int    // user_id used in EncryptionContext
+	HealthProbeDEK      string // plaintext string that will be base64'ed and echoed
+	HealthProbeAnswerFP string // answer_fp to bind in context
+	HealthProbeUserID   int    // user_id for EncryptionContext
+
+	// --- Network policy ---
+	AllowedCIDRs []net.IPNet // source IPs allowed to hit /kms/*
 }
 
+// Parse and load everything from env.
 func Load() Config {
+	allowed := parseCIDRs(os.Getenv("ALLOWED_CIDRS")) // e.g. "185.229.225.151/32,5.180.181.53/32"
+
 	return Config{
 		// KMS #1 (AWS)
 		KMS1URL:       os.Getenv("KMS1_URL"),
@@ -42,7 +50,7 @@ func Load() Config {
 		KMS1AccessKey: os.Getenv("KMS1_ACCESS_KEY_ID"),
 		KMS1SecretKey: os.Getenv("KMS1_SECRET_ACCESS_KEY"),
 
-		// Main app status callback (optional)
+		// Optional
 		MainStatusURL: os.Getenv("MAIN_STATUS_URL"),
 
 		// Redis
@@ -55,11 +63,42 @@ func Load() Config {
 		NonceTTL:       d(os.Getenv("NONCE_TTL"), 5*time.Minute),
 		LockTTL:        d(os.Getenv("LOCK_TTL"), 5*time.Minute),
 
-		// Probe content (defaults are safe)
+		// Health probe content
 		HealthProbeDEK:      getenv("HEALTH_PROBE_DEK", "kms-health-echo"),
 		HealthProbeAnswerFP: getenv("HEALTH_PROBE_ANSWER_FP", "healthcheck"),
 		HealthProbeUserID:   geti("HEALTH_PROBE_USER_ID", 0),
+
+		// Network policy
+		AllowedCIDRs: allowed,
 	}
+}
+
+func (c Config) IsIPAllowed(ip net.IP) bool {
+	// If no CIDRs configured, allow all (you can flip to “deny all” if you prefer).
+	if len(c.AllowedCIDRs) == 0 {
+		return true
+	}
+	for _, n := range c.AllowedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCIDRs(s string) []net.IPNet {
+	var out []net.IPNet
+	if s == "" {
+		return out
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		_, n, err := net.ParseCIDR(part)
+		if err == nil && n != nil {
+			out = append(out, *n)
+		}
+	}
+	return out
 }
 
 func d(s string, def time.Duration) time.Duration {

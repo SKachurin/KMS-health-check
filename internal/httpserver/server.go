@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/SKachurin/KMS-health-check/internal/config"
+	"github.com/SKachurin/KMS-health-check/internal/health"
 	"github.com/SKachurin/KMS-health-check/internal/kmsclient"
 	"github.com/SKachurin/KMS-health-check/internal/ratelimit"
 )
@@ -26,8 +27,7 @@ type Server struct {
 	kms    map[string]kmsclient.Client
 }
 
-// Start listener:
-//  - :8443 HTTPS with mutual TLS (client cert required) for /kms/* endpoints
+// Start listener: :8443 HTTPS with mutual TLS (client cert required) for /kms/*
 func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, clients map[string]kmsclient.Client) {
 	s := &Server{
 		cfg:    cfg,
@@ -35,17 +35,15 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 		locker: locker,
 	}
 
-	// mux for listener
 	mux := http.NewServeMux()
 
-	// Health probe (no mTLS required on 8080; you can also serve it on 8443)
+	// Health probe (simple liveness; no mTLS required if you expose separately)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Wrap/Unwrap behind mTLS + IP allow-list (we check IP inside the handler)
-	// HMAC is completely removed.
+	// Wrap/Unwrap behind mTLS + IP allow-list (no HMAC)
 	mux.HandleFunc("/kms/wrap", s.withIPAllowList(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withIPAllowList(s.unwrap))
 	mux.HandleFunc("/kms/health/check", s.withIPAllowList(s.kmsHealthCheck))
@@ -76,22 +74,18 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 		TLSConfig: tlsCfg,
 	}
 
-	// graceful shutdown
 	go func() {
 		<-ctx.Done()
 		_ = tlsSrv.Shutdown(context.Background())
 	}()
 
-	// run
 	log.Println("mTLS listening :8443 (wrap/unwrap)")
 	if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
-// withIPAllowList enforces source IP matches Config.AllowedCIDRs (if any).
-// It works for both direct connections and simple L4 forwarding.
-// If you later put a reverse proxy in front, adapt to trust X-Forwarded-For safely.
+// IP allow-list using cfg.AllowedCIDRs (e.g., "185.229.225.151/32")
 func (s *Server) withIPAllowList(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -108,7 +102,7 @@ func (s *Server) withIPAllowList(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// --- WRAP: fan-out to requested KMS ids (no deny window here) ---
+// ---------- /kms/wrap ----------
 func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	raw, in, ok := readJSON[struct {
 		UserID   int      `json:"user_id"`
@@ -120,7 +114,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_ = raw // kept for parity; not used now
+	_ = raw
 
 	ids := in.KMSIDs
 	if len(ids) == 0 {
@@ -162,7 +156,7 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": out})
 }
 
-// --- UNWRAP: deny-window (LockTTL) on (user_id, answer_fp) ---
+// ---------- /kms/unwrap (deny window on (user_id, answer_fp)) ----------
 func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 	raw, in, ok := readJSON[struct {
 		UserID   int      `json:"user_id"`
@@ -221,7 +215,6 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		p := <-ch
 		results[p.id] = map[string]bool{"ok": p.ok}
 		if dekOut == "" && p.ok && p.dek != "" {
-			// sanity
 			if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
 				dekOut = p.dek
 			}
@@ -235,7 +228,22 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// /kms/health/check — real echo (wrap+unwrap) using health.CheckOnce
+func (s *Server) kmsHealthCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ReqTimeout)
+	defer cancel()
+
+	statuses := health.CheckOnce(ctx, s.cfg, s.kms)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"statuses": statuses,
+		"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
 // helpers
+
 func jsonError(w http.ResponseWriter, code int, msg string, extra map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -262,17 +270,4 @@ func readJSON[T any](w http.ResponseWriter, r *http.Request) ([]byte, T, bool) {
 		return nil, zero, false
 	}
 	return raw, in, true
-}
-
-func (s *Server) kmsHealthCheck(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ReqTimeout)
-	defer cancel()
-
-	statuses := health.CheckOnce(ctx, s.cfg, s.kms)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"statuses": statuses,
-		"ts":       time.Now().UTC().Format(time.RFC3339Nano),
-	})
 }
