@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SKachurin/KMS-health-check/internal/config"
@@ -27,7 +28,9 @@ type Server struct {
 	kms    map[string]kmsclient.Client
 }
 
-// Start listener: :8443 HTTPS with mutual TLS (client cert required) for /kms/*
+// Start two listeners:
+// - :8443 HTTPS with mutual TLS (client cert required) for /kms/* endpoints
+// - :8080 HTTP, INTERNAL-ONLY liveness endpoint for Docker healthcheck
 func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, clients map[string]kmsclient.Client) {
 	s := &Server{
 		cfg:    cfg,
@@ -35,20 +38,32 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 		locker: locker,
 	}
 
-	mux := http.NewServeMux()
-
-	// Health probe (simple liveness; no mTLS required if you expose separately)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	// -------------------------------
+	// INTERNAL liveness server (:8080)
+	// -------------------------------
+	liveMux := http.NewServeMux()
+	liveMux.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	liveSrv := &http.Server{Addr: ":8080", Handler: liveMux}
+	go func() {
+		if err := liveSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
 
-	// Wrap/Unwrap behind mTLS + IP allow-list (no HMAC)
+	// -------------------------------
+	// mTLS server (:8443) for /kms/*
+	// -------------------------------
+	mux := http.NewServeMux()
+
+	// Protected endpoints (mTLS + IP allow-list)
 	mux.HandleFunc("/kms/wrap", s.withIPAllowList(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withIPAllowList(s.unwrap))
 	mux.HandleFunc("/kms/health/check", s.withIPAllowList(s.kmsHealthCheck))
 
-	// --- TLS + mTLS on 8443 ---
+	// TLS config
 	cert, err := tls.LoadX509KeyPair("/certs/server.crt", "/certs/server.key")
 	if err != nil {
 		log.Fatal("load server cert:", err)
@@ -61,39 +76,47 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 	if !caPool.AppendCertsFromPEM(caPEM) {
 		log.Fatal("append CA failed")
 	}
-
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    caPool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS12,
 	}
+
 	tlsSrv := &http.Server{
 		Addr:      ":8443",
 		Handler:   mux,
 		TLSConfig: tlsCfg,
 	}
 
+	// graceful shutdown for both servers
 	go func() {
 		<-ctx.Done()
 		_ = tlsSrv.Shutdown(context.Background())
+		_ = liveSrv.Shutdown(context.Background())
 	}()
 
-	log.Println("mTLS listening :8443 (wrap/unwrap)")
+	log.Println("mTLS listening :8443 (/kms/*)")
 	if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
 // IP allow-list using cfg.AllowedCIDRs (e.g., "185.229.225.151/32")
+// If TRUST_PROXY=true and X-Forwarded-For is present, use its left-most IP.
 func (s *Server) withIPAllowList(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			jsonError(w, http.StatusForbidden, "forbidden", map[string]any{"reason": "bad remote addr"})
-			return
-		}
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		ip := net.ParseIP(host)
+
+		if s.cfg.TrustProxy {
+			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+				left := strings.Split(strings.TrimSpace(xf), ",")[0]
+				if p := net.ParseIP(strings.TrimSpace(left)); p != nil {
+					ip = p
+				}
+			}
+		}
 		if ip == nil || !s.cfg.IsIPAllowed(ip) {
 			jsonError(w, http.StatusForbidden, "forbidden", map[string]any{"reason": "ip not allowed"})
 			return
@@ -233,7 +256,7 @@ func (s *Server) kmsHealthCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ReqTimeout)
 	defer cancel()
 
-	statuses := health.CheckOnce(ctx, s.cfg, s.kms)
+	statuses := health.CheckOnce(ctx, s.kms)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

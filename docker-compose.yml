@@ -18,9 +18,6 @@ services:
       # Redis
       REDIS_URL: "redis://redis:6379/0"
 
-      # Security (keep for now; you can delete later when mTLS is in)
-      KMS_HEALTH_SECRET: "${KMS_HEALTH_SECRET}"
-
       # IP allow-list & proxy trust
       ALLOW_IPS: "${ALLOW_IPS}"     # e.g. "185.229.225.151/32,90.167.0.0/16"
       TRUST_PROXY: "${TRUST_PROXY}" # "true" if behind nginx/elb that sets X-Forwarded-For
@@ -34,11 +31,14 @@ services:
 
     depends_on:
       - redis
+    labels:
+      - autoheal=true
+      -
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
-      interval: 15s
-      timeout: 2s
-      retries: 10
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/live"]
+      interval: 100s
+      timeout: 3s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -46,6 +46,17 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 10
+      AUTOHEAL_START_PERIOD: 0
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   redis-data:

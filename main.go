@@ -7,7 +7,6 @@ import (
     "github.com/redis/go-redis/v9"
 
     "github.com/SKachurin/KMS-health-check/internal/config"
-    "github.com/SKachurin/KMS-health-check/internal/health"
     "github.com/SKachurin/KMS-health-check/internal/httpserver"
     "github.com/SKachurin/KMS-health-check/internal/kmsclient"
     "github.com/SKachurin/KMS-health-check/internal/ratelimit"

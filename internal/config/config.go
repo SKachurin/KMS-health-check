@@ -35,12 +35,13 @@ type Config struct {
 	HealthProbeUserID   int    // user_id for EncryptionContext
 
 	// --- Network policy ---
+	TrustProxy  bool
 	AllowedCIDRs []net.IPNet // source IPs allowed to hit /kms/*
 }
 
 // Parse and load everything from env.
 func Load() Config {
-	allowed := parseCIDRs(os.Getenv("ALLOWED_CIDRS")) // e.g. "185.229.225.151/32,5.180.181.53/32"
+	allowed := parseCIDRs(os.Getenv("ALLOW_IPS"))
 
 	return Config{
 		// KMS #1 (AWS)
@@ -69,6 +70,7 @@ func Load() Config {
 		HealthProbeUserID:   geti("HEALTH_PROBE_USER_ID", 0),
 
 		// Network policy
+		TrustProxy:  getb("TRUST_PROXY", false),
 		AllowedCIDRs: allowed,
 	}
 }
