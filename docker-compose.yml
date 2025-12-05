@@ -33,7 +33,7 @@ services:
       - redis
     labels:
       - autoheal=true
-      -
+
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/live"]
       interval: 100s
