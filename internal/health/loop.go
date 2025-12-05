@@ -1,73 +1,59 @@
 package health
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"net/http"
+	"encoding/base64"
 	"time"
 
-	"github.com/SKachurin/KMS-health-check/internal/auth"
 	"github.com/SKachurin/KMS-health-check/internal/config"
 	"github.com/SKachurin/KMS-health-check/internal/kmsclient"
 )
 
+// CheckOnce performs a real echo: wrap -> unwrap -> compare.
+// "up" only if the returned dek matches the sent one.
+func CheckOnce(ctx context.Context, cfg config.Config, clients map[string]kmsclient.Client) map[string]string {
+	statuses := make(map[string]string, len(clients))
+
+	// Build probe payload once.
+	dekB64 := base64.StdEncoding.EncodeToString([]byte(cfg.HealthProbeDEK))
+	// H is unused by AWS KMS encryption context; any base64 is fine for now.
+	hB64 := base64.StdEncoding.EncodeToString([]byte("health-H"))
+	answerFP := cfg.HealthProbeAnswerFP
+	userID := cfg.HealthProbeUserID
+
+	for id, c := range clients {
+		// wrap
+		wB64, err := c.Wrap(ctx, userID, dekB64, hB64, answerFP)
+		if err != nil || wB64 == "" {
+			statuses[id] = "down"
+			continue
+		}
+		// unwrap
+		outDekB64, ok, err := c.Unwrap(ctx, userID, hB64, answerFP, wB64)
+		if err != nil || !ok {
+			statuses[id] = "down"
+			continue
+		}
+		// compare
+		if outDekB64 == dekB64 {
+			statuses[id] = "up"
+		} else {
+			statuses[id] = "down"
+		}
+	}
+	return statuses
+}
+
+// Optional background pusher.
 func StartLoop(ctx context.Context, cfg config.Config, clients map[string]kmsclient.Client) {
 	t := time.NewTicker(cfg.HealthInterval)
 	defer t.Stop()
-	httpc := &http.Client{Timeout: cfg.ReqTimeout}
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			statuses := make(map[string]string, len(clients))
-			for id, c := range clients {
-				if err := c.Health(ctx); err != nil {
-					statuses[id] = "down"
-				} else {
-					statuses[id] = "up"
-				}
-			}
-			if cfg.MainStatusURL != "" {
-				_ = post(ctx, httpc, cfg, statuses)
-			}
+			_ = CheckOnce(ctx, cfg, clients)
 		}
 	}
-}
-
-func post(ctx context.Context, httpc *http.Client, cfg config.Config, statuses map[string]string) error {
-	body, _ := json.Marshal(map[string]any{"statuses": statuses})
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	nonce := randNonce(16)
-	sig := auth.ComputeMAC(body, ts, nonce, []byte(cfg.HealthSecret))
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.MainStatusURL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Ts", ts)
-	req.Header.Set("X-Nonce", nonce)
-	req.Header.Set("X-Sig", sig)
-
-	resp, err := httpc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("post status: %s", resp.Status)
-	}
-	return nil
-}
-
-func randNonce(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		// fallback: timestamp hex (last resort)
-		return hex.EncodeToString([]byte(time.Now().Format("20060102150405.000000000")))
-	}
-	return hex.EncodeToString(b)
 }

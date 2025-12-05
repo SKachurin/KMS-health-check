@@ -32,5 +32,5 @@ func main() {
     }
 
     go httpserver.Start(ctx, cfg, locker, clients)
-    health.StartLoop(ctx, cfg, clients)
+//     health.StartLoop(ctx, cfg, clients)
 }

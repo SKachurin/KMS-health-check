@@ -48,6 +48,7 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 	// HMAC is completely removed.
 	mux.HandleFunc("/kms/wrap", s.withIPAllowList(s.wrap))
 	mux.HandleFunc("/kms/unwrap", s.withIPAllowList(s.unwrap))
+	mux.HandleFunc("/kms/health/check", s.withIPAllowList(s.kmsHealthCheck))
 
 	// --- TLS + mTLS on 8443 ---
 	cert, err := tls.LoadX509KeyPair("/certs/server.crt", "/certs/server.key")
@@ -261,4 +262,17 @@ func readJSON[T any](w http.ResponseWriter, r *http.Request) ([]byte, T, bool) {
 		return nil, zero, false
 	}
 	return raw, in, true
+}
+
+func (s *Server) kmsHealthCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ReqTimeout)
+	defer cancel()
+
+	statuses := health.CheckOnce(ctx, s.cfg, s.kms)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"statuses": statuses,
+		"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }

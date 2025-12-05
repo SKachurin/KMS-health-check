@@ -1,41 +1,40 @@
 package config
 
 import (
-	"net"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type Config struct {
 	// --- KMS #1 (AWS) ---
-	KMS1URL       string // e.g. "kms.eu-north-1.amazonaws.com"
-	KMS1Region    string // e.g. "eu-north-1"
+	KMS1URL       string
+	KMS1Region    string
 	KMS1KeyID     string
 	KMS1AccessKey string
 	KMS1SecretKey string
 
-	// --- Optional status callback (unused by TLS-only flow, keep if you need) ---
+	// --- Main app callbacks / status (optional) ---
 	MainStatusURL string
 
 	// --- Redis ---
-	RedisURL string // e.g. "redis://redis:6379/0"
+	RedisURL string
 
 	// --- Timing knobs ---
 	HealthInterval time.Duration
 	ReqTimeout     time.Duration
+	Skew           time.Duration // unused now; kept for future
+	NonceTTL       time.Duration // unused now; kept for future
+	LockTTL        time.Duration // deny window for unwrap (user_id, answer_fp)
 
-	// --- Deny window for unwrap (user_id, answer_fp) ---
-	LockTTL time.Duration
-
-	// --- IP allow-list for wrap/unwrap (comma-separated CIDRs/IPs) ---
-	AllowedCIDRs []string
-	allowedNets  []*net.IPNet // parsed at load time
+	// --- Health probe content (for wrap/unwrap echo) ---
+	HealthProbeDEK      string // plaintext DEK to echo (base64-encoded internally)
+	HealthProbeAnswerFP string // answer_fp used in EncryptionContext
+	HealthProbeUserID   int    // user_id used in EncryptionContext
 }
 
 func Load() Config {
-	c := Config{
+	return Config{
 		// KMS #1 (AWS)
 		KMS1URL:       os.Getenv("KMS1_URL"),
 		KMS1Region:    getenv("KMS1_REGION", "eu-north-1"),
@@ -43,7 +42,7 @@ func Load() Config {
 		KMS1AccessKey: os.Getenv("KMS1_ACCESS_KEY_ID"),
 		KMS1SecretKey: os.Getenv("KMS1_SECRET_ACCESS_KEY"),
 
-		// Callback (optional)
+		// Main app status callback (optional)
 		MainStatusURL: os.Getenv("MAIN_STATUS_URL"),
 
 		// Redis
@@ -52,52 +51,16 @@ func Load() Config {
 		// Timing
 		HealthInterval: d(os.Getenv("HEALTH_INTERVAL"), 15*time.Second),
 		ReqTimeout:     d(os.Getenv("REQ_TIMEOUT"), 2*time.Second),
+		Skew:           d(os.Getenv("SIG_SKEW"), 60*time.Second),
+		NonceTTL:       d(os.Getenv("NONCE_TTL"), 5*time.Minute),
+		LockTTL:        d(os.Getenv("LOCK_TTL"), 5*time.Minute),
 
-		// Unwrap deny window (default 5m)
-		LockTTL: d(os.Getenv("LOCK_TTL"), 5*time.Minute),
-
-		// IP allow-list
-		AllowedCIDRs: splitTrim(os.Getenv("ALLOWED_CIDRS")),
+		// Probe content (defaults are safe)
+		HealthProbeDEK:      getenv("HEALTH_PROBE_DEK", "kms-health-echo"),
+		HealthProbeAnswerFP: getenv("HEALTH_PROBE_ANSWER_FP", "healthcheck"),
+		HealthProbeUserID:   geti("HEALTH_PROBE_USER_ID", 0),
 	}
-
-	// Parse CIDRs/IPs into nets
-	for _, cidr := range c.AllowedCIDRs {
-		if cidr == "" {
-			continue
-		}
-		// If user passed a bare IP, treat it as /32 (IPv4) or /128 (IPv6)
-		if !strings.Contains(cidr, "/") {
-			if ip := net.ParseIP(cidr); ip != nil {
-				var mask string
-				if ip.To4() != nil {
-					mask = "/32"
-				} else {
-					mask = "/128"
-				}
-				cidr = cidr + mask
-			}
-		}
-		if _, n, err := net.ParseCIDR(cidr); err == nil {
-			c.allowedNets = append(c.allowedNets, n)
-		}
-	}
-	return c
 }
-
-func (c Config) IsIPAllowed(ip net.IP) bool {
-	// No allow-list => allow all
-	if len(c.allowedNets) == 0 {
-		return true
-	}
-	for _, n := range c.allowedNets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// helpers
 
 func d(s string, def time.Duration) time.Duration {
 	if s == "" {
@@ -119,17 +82,11 @@ func getenv(k, def string) string {
 	return def
 }
 
-func splitTrim(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
+func geti(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
-	return out
+	return def
 }
