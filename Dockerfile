@@ -20,6 +20,6 @@ RUN go build -o /kms-healthcheck .
 
 ## Runtime
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates wget
 COPY --from=builder /kms-healthcheck /usr/local/bin/kms-healthcheck
 ENTRYPOINT ["/usr/local/bin/kms-healthcheck"]

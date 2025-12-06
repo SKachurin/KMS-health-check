@@ -1,35 +1,36 @@
 package main
 
 import (
-    "context"
-    "log"
+	"context"
+	"log"
+	"os/signal"
+	"syscall"
 
-    "github.com/redis/go-redis/v9"
-
-    "github.com/SKachurin/KMS-health-check/internal/config"
-    "github.com/SKachurin/KMS-health-check/internal/httpserver"
-    "github.com/SKachurin/KMS-health-check/internal/kmsclient"
-    "github.com/SKachurin/KMS-health-check/internal/ratelimit"
+	"github.com/SKachurin/KMS-health-check/internal/config"
+	"github.com/SKachurin/KMS-health-check/internal/httpserver"
+	"github.com/SKachurin/KMS-health-check/internal/kmsclient"
+	"github.com/SKachurin/KMS-health-check/internal/ratelimit"
 )
 
 func main() {
-    ctx := context.Background()
-    cfg := config.Load()
+	cfg := config.Load()
 
-    // Redis -> locker
-    opt, err := redis.ParseURL(cfg.RedisURL)
-    if err != nil { log.Fatal(err) }
-    rdb := redis.NewClient(opt)
-    locker := ratelimit.NewLocker(rdb, cfg.LockTTL)
+	// ratelimit.New returns (*Locker, error) — handle both
+	locker, err := ratelimit.New(cfg.RedisURL, cfg.LockTTL, 0)
+	if err != nil {
+		log.Fatalf("ratelimit init: %v", err)
+	}
 
-    // ONE AWS KMS
-    kms1, err := kmsclient.NewAWS(ctx, cfg.KMS1Region, cfg.KMS1KeyID, cfg.KMS1AccessKey, cfg.KMS1SecretKey, cfg.KMS1URL)
-    if err != nil { log.Fatal(err) }
+	// Build KMS clients (use your existing helper; or construct manually if you prefer)
+	clients, err := kmsclient.BuildAll(cfg)
+	if err != nil {
+		log.Fatalf("kms clients: %v", err)
+	}
 
-    clients := map[string]kmsclient.Client{
-        "kms1": kms1,
-    }
+	// Graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-    go httpserver.Start(ctx, cfg, locker, clients)
-//     health.StartLoop(ctx, cfg, clients)
+	// Start servers (8443 mTLS + 8080 live)
+	httpserver.Start(ctx, cfg, locker, clients)
 }
