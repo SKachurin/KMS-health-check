@@ -1,0 +1,159 @@
+openapi: 3.0.3
+info:
+  title: KMS Health Gateway
+  version: 1.0.0
+  description: mTLS gateway for wrap/unwrap + health.
+servers:
+  - url: https://185.229.225.151:8443
+    description: mTLS endpoint
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+  schemas:
+    WrapRequest:
+      type: object
+      required: [user_id, dek_b64, h_b64, answer_fp]
+      properties:
+        user_id: { type: integer, format: int32, example: 0 }
+        dek_b64: { type: string, description: "Base64 32B DEK" }
+        h_b64:   { type: string, description: "Base64 32B H (Argon2id output)" }
+        answer_fp: { type: string }
+        kms_ids:
+          type: array
+          items: { type: string }
+          description: Optional; defaults to all
+    WrapResponse:
+      type: object
+      properties:
+        results:
+          type: object
+          description: Map of KMS id -> wrap result.
+          additionalProperties:
+            oneOf:
+              - type: object
+                description: Success
+                required: [ ok, w_b64 ]
+                properties:
+                  ok: { type: boolean, enum: [ true ] }
+                  w_b64: { type: string, description: "Base64-wrapped blob" }
+              - type: object
+                description: Failure
+                required: [ ok ]
+                properties:
+                  ok: { type: boolean, enum: [ false ] }
+      required: [ results ]
+      example:
+        results:
+          kms1: { ok: true,  w_b64: "BASE64..." }
+          kms2: { ok: false }
+          kms3: { ok: true,  w_b64: "BASE64..." }
+    UnwrapReplica:
+      type: object
+      required: [ kms_id, w_b64 ]
+      properties:
+        kms_id: { type: string }
+        w_b64: { type: string }
+    UnwrapRequest:
+      type: object
+      required: [ user_id, h_b64, answer_fp, replicas ]
+      properties:
+        user_id: { type: integer, format: int32 }
+        h_b64: { type: string }
+        answer_fp: { type: string }
+        replicas:
+          type: array
+          items: { $ref: '#/components/schemas/UnwrapReplica' }
+    UnwrapResponse:
+      type: object
+      required: [ deks_b64, results ]
+      properties:
+        deks_b64:
+          type: object
+          description: "Map KMS id -> DEK for each KMS. Empty string means failure."
+          additionalProperties:
+            type: string
+        results:
+          type: object
+          description: "Map KMS id -> ok flag. ok=true implies deks_b64[kms_id] is non-empty."
+          additionalProperties:
+            type: object
+            required: [ ok ]
+            properties:
+              ok: { type: boolean }
+      example:
+        deks_b64:
+          kms1: "BASE64_32B_DEK..."
+          kms2: ""
+          kms3: "BASE64_32B_DEK..."
+        results:
+          kms1: { ok: true }
+          kms2: { ok: false }
+          kms3: { ok: true }
+    RateLimited:
+      type: object
+      properties:
+        error: { type: string, example: rate_limited }
+        retry_after_seconds: { type: integer, example: 300 }
+        key: { type: string, example: "lock:unwrap:0:healthcheck" }
+        scope: { type: string, example: "user_id+answer_fp" }
+paths:
+  /kms/wrap:
+    post:
+      summary: Wrap DEK with KMS using H and answer_fp
+      security: [{ mtls: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WrapRequest' }
+      responses:
+        '200':
+          description: Per-KMS results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WrapResponse' }
+        '403': { description: IP not allowed }
+        '400': { description: Bad request }
+  /kms/unwrap:
+    post:
+      summary: Unwrap DEK using provided replicas
+      security: [ { mtls: [ ] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnwrapRequest'
+      responses:
+        '200':
+          description: Per-KMS results and DEKs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnwrapResponse'
+        '429':
+          description: Rate limited (same user_id+answer_fp within LOCK_TTL)
+  /kms/health/check:
+    get:
+      summary: Real echo (wrap+unwrap) probe summary
+      security: [{ mtls: [] }]
+      responses:
+        '200':
+          description: Status per KMS
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  statuses:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [ok, fail, timeout]
+                  ts: { type: string, format: date-time }
+        '429':
+          description: Rate limited (same user_id+answer_fp within LOCK_TTL)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateLimited' }

@@ -179,20 +179,32 @@ func (s *Server) wrap(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": out})
 }
 
-// ---------- /kms/unwrap (deny window on (user_id, answer_fp)) ----------
+// ---------- /kms/unwrap (replicas[] required) ----------
 func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
-	raw, in, ok := readJSON[struct {
-		UserID   int      `json:"user_id"`
-		HB64     string   `json:"h_b64"`
-		AnswerFP string   `json:"answer_fp"`
-		WB64     string   `json:"w_b64"`
-		KMSIDs   []string `json:"kms_ids"`
-	}](w, r)
+	type replicaIn struct {
+		KMSID string `json:"kms_id"`
+		WB64  string `json:"w_b64"`
+	}
+	type req struct {
+		UserID   int         `json:"user_id"`
+		HB64     string      `json:"h_b64"`     // base64 32B H
+		AnswerFP string      `json:"answer_fp"` // fingerprint of the answer
+		Replicas []replicaIn `json:"replicas"`  // [{kms_id,w_b64}, ...] REQUIRED
+	}
+
+	raw, in, ok := readJSON[req](w, r)
 	if !ok {
 		return
 	}
 	_ = raw
 
+	// Require replicas
+	if len(in.Replicas) == 0 {
+		jsonError(w, http.StatusBadRequest, "bad_request", map[string]any{"detail": "replicas[] is required"})
+		return
+	}
+
+	// Rate-limit per (user_id, answer_fp)
 	lockKey := "lock:unwrap:" + strconv.Itoa(in.UserID) + ":" + in.AnswerFP
 	if ok, _ := s.locker.TryAcquire(r.Context(), lockKey); !ok {
 		retry := int(s.cfg.LockTTL.Seconds())
@@ -205,50 +217,62 @@ func (s *Server) unwrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids := in.KMSIDs
-	if len(ids) == 0 {
-		ids = make([]string, 0, len(s.kms))
-		for id := range s.kms {
-			ids = append(ids, id)
-		}
+	type pr struct {
+		id  string
+		ok  bool
+		dek string
 	}
+	ch := make(chan pr, len(in.Replicas))
 
-	type pr struct{ id string; ok bool; dek string }
-	ch := make(chan pr, len(ids))
+	// Try each provided replica on its matching KMS, in parallel
+	for _, rep := range in.Replicas {
+		id := rep.KMSID
+		blob := rep.WB64
 
-	for _, id := range ids {
 		client, ok := s.kms[id]
-		if !ok {
-			ch <- pr{id, false, ""}
+		if !ok || blob == "" {
+			ch <- pr{id: id, ok: false, dek: ""}
 			continue
 		}
-		go func(id string, c kmsclient.Client) {
-			dek, ok, err := c.Unwrap(r.Context(), in.UserID, in.HB64, in.AnswerFP, in.WB64)
+		go func(id string, c kmsclient.Client, wblob string) {
+			dek, ok, err := c.Unwrap(r.Context(), in.UserID, in.HB64, in.AnswerFP, wblob)
 			if err != nil {
-				ch <- pr{id, false, ""}
+				ch <- pr{id: id, ok: false, dek: ""}
 				return
 			}
-			ch <- pr{id, ok, dek}
-		}(id, client)
+			ch <- pr{id: id, ok: ok, dek: dek}
+		}(id, client, blob)
 	}
 
-	var dekOut string
-	results := map[string]map[string]bool{}
-	for range ids {
-		p := <-ch
-		results[p.id] = map[string]bool{"ok": p.ok}
-		if dekOut == "" && p.ok && p.dek != "" {
-			if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
-				dekOut = p.dek
-			}
-		}
-	}
+	results := map[string]map[string]bool{} // id -> {"ok": bool}
+    deks := map[string]string{}             // id -> dek_b64 OR "" on failure
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"dek_b64": dekOut,
-		"results": results,
-	})
+    // Pre-fill deks with empty strings for every requested kms_id
+    for _, rep := range in.Replicas {
+        deks[rep.KMSID] = ""
+    }
+
+    for range in.Replicas {
+        p := <-ch
+
+        // default: fail
+        results[p.id] = map[string]bool{"ok": false}
+        deks[p.id] = "" // keep explicit
+
+        if p.ok && p.dek != "" {
+            // validate base64 before accepting
+            if _, err := base64.StdEncoding.DecodeString(p.dek); err == nil {
+                results[p.id] = map[string]bool{"ok": true}
+                deks[p.id] = p.dek
+            }
+        }
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "deks_b64": deks,    // ALWAYS has every kms_id key
+        "results":  results, // ok=true implies deks_b64[kms_id] != ""
+    })
 }
 
 // /kms/health/check — real echo (wrap+unwrap) using health.CheckOnce
