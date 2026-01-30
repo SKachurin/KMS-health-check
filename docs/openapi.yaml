@@ -150,10 +150,5 @@ paths:
                     type: object
                     additionalProperties:
                       type: string
-                      enum: [ok, fail, timeout]
+                      enum: [ up, down ]
                   ts: { type: string, format: date-time }
-        '429':
-          description: Rate limited (same user_id+answer_fp within LOCK_TTL)
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RateLimited' }
