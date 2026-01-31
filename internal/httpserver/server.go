@@ -81,6 +81,11 @@ func Start(ctx context.Context, cfg config.Config, locker *ratelimit.Locker, cli
 		ClientCAs:    caPool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS12,
+		CurvePreferences: []tls.CurveID{
+                tls.X25519,
+                tls.CurveP256,
+        },
+        SessionTicketsDisabled: true,
 	}
 
 	tlsSrv := &http.Server{
@@ -109,14 +114,15 @@ func (s *Server) withIPAllowList(next http.HandlerFunc) http.HandlerFunc {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		ip := net.ParseIP(host)
 
-		if s.cfg.TrustProxy {
-			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-				left := strings.Split(strings.TrimSpace(xf), ",")[0]
-				if p := net.ParseIP(strings.TrimSpace(left)); p != nil {
-					ip = p
-				}
-			}
-		}
+// TrustProxy block
+// 		if s.cfg.TrustProxy {
+// 			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+// 				left := strings.Split(strings.TrimSpace(xf), ",")[0]
+// 				if p := net.ParseIP(strings.TrimSpace(left)); p != nil {
+// 					ip = p
+// 				}
+// 			}
+// 		}
 		if ip == nil || !s.cfg.IsIPAllowed(ip) {
 			jsonError(w, http.StatusForbidden, "forbidden", map[string]any{"reason": "ip not allowed"})
 			return
