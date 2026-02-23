@@ -85,7 +85,7 @@ func buildSlot(ctx context.Context, slot string, provider string, cfg config.Con
 			cfg.KMS2URL,        // vault URL
 			cfg.KMS2KeyID,      // key name
 			cfg.KMS2TenantID,
-			cfg.KMS2AccessKey,  // client_id
+			cfg.KMS2ClientID,  // client_id
 			cfg.KMS2SecretKey,  // client_secret
 		)
 
