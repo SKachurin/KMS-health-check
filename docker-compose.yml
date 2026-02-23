@@ -9,12 +9,19 @@ services:
       - /opt/mtls:/certs:ro
     environment:
       # AWS KMS #1
+      KMS1_PROVIDER: "${KMS1_PROVIDER}"
       KMS1_URL: "${KMS1_URL}"
       KMS1_REGION: "${KMS1_REGION}"
       KMS1_KEY_ID: "${KMS1_KEY_ID}"
       KMS1_ACCESS_KEY_ID: "${KMS1_ACCESS_KEY_ID}"
       KMS1_SECRET_ACCESS_KEY: "${KMS1_SECRET_ACCESS_KEY}"
 
+      KMS2_PROVIDER: "${KMS2_PROVIDER}"
+      KMS2_URL: "${KMS2_URL}"
+      KMS2_TENANT_ID: "${KMS2_TENANT_ID}"
+      KMS2_ACCESS_KEY_ID: "${KMS2_ACCESS_KEY_ID}"
+      KMS2_SECRET_ACCESS_KEY: "${KMS2_SECRET_ACCESS_KEY}"
+      KMS2_KEY_ID: "${KMS2_KEY_ID}"
       # Redis
       REDIS_URL: "redis://redis:6379/0"
 
