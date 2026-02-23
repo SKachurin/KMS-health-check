@@ -10,14 +10,14 @@ import (
 
 type Config struct {
 	// --- KMS #1 (AWS) ---
-	KMS1PROVIDER  string
+	KMS1Provider  string
 	KMS1URL       string
 	KMS1Region    string
 	KMS1KeyID     string
 	KMS1AccessKey string
 	KMS1SecretKey string
     // --- KMS #2 (Azure) ---
-    KMS2PROVIDER  string
+    KMS2Provider  string
     KMS2URL       string // vault URL
     KMS2KeyID     string // key name
     KMS2TenantID  string
@@ -48,7 +48,7 @@ func Load() Config {
 
 	return Config{
 		// KMS #1 (AWS)
-		KMS1PROVIDER   os.Getenv("KMS1_PROVIDER"),
+		KMS1Provider:  os.Getenv("KMS1_PROVIDER"),
 		KMS1URL:       os.Getenv("KMS1_URL"),
 		KMS1Region:    getenv("KMS1_REGION", "eu-north-1"),
 		KMS1KeyID:     os.Getenv("KMS1_KEY_ID"),
@@ -56,7 +56,7 @@ func Load() Config {
 		KMS1SecretKey: os.Getenv("KMS1_SECRET_ACCESS_KEY"),
 
         // KMS #2 (Azure)
-        KMS2PROVIDER   os.Getenv("KMS2_PROVIDER"),
+        KMS2Provider:  os.Getenv("KMS2_PROVIDER"),
         KMS2URL:       os.Getenv("KMS2_URL"),
         KMS2KeyID:     os.Getenv("KMS2_KEY_ID"),
         KMS2TenantID:  os.Getenv("KMS2_TENANT_ID"),
