@@ -10,30 +10,33 @@ import (
 
 type Config struct {
 	// --- KMS #1 (AWS) ---
+	KMS1PROVIDER  string
 	KMS1URL       string
 	KMS1Region    string
 	KMS1KeyID     string
 	KMS1AccessKey string
 	KMS1SecretKey string
-
+    // --- KMS #2 (Azure) ---
+    KMS2PROVIDER  string
+    KMS2URL       string // vault URL
+    KMS2KeyID     string // key name
+    KMS2TenantID  string
+    KMS2ClientID  string // client_id
+    KMS2SecretKey string // client_secret
 	// --- Main app callbacks / status (optional) ---
 	MainStatusURL string
-
 	// --- Redis ---
 	RedisURL string
-
 	// --- Timing knobs ---
 	HealthInterval time.Duration
 	ReqTimeout     time.Duration
 	Skew           time.Duration // kept for future use
 	NonceTTL       time.Duration // kept for future use
 	LockTTL        time.Duration // deny window for unwrap (user_id, answer_fp)
-
 	// --- Health probe content (for wrap/unwrap echo) ---
 	HealthProbeDEK      string // plaintext string that will be base64'ed and echoed
 	HealthProbeAnswerFP string // answer_fp to bind in context
 	HealthProbeUserID   int    // user_id for EncryptionContext
-
 	// --- Network policy ---
 	TrustProxy  bool
 	AllowedCIDRs []net.IPNet // source IPs allowed to hit /kms/*
@@ -45,11 +48,20 @@ func Load() Config {
 
 	return Config{
 		// KMS #1 (AWS)
+		KMS1PROVIDER   os.Getenv("KMS1_PROVIDER"),
 		KMS1URL:       os.Getenv("KMS1_URL"),
 		KMS1Region:    getenv("KMS1_REGION", "eu-north-1"),
 		KMS1KeyID:     os.Getenv("KMS1_KEY_ID"),
 		KMS1AccessKey: os.Getenv("KMS1_ACCESS_KEY_ID"),
 		KMS1SecretKey: os.Getenv("KMS1_SECRET_ACCESS_KEY"),
+
+        // KMS #2 (Azure)
+        KMS2PROVIDER   os.Getenv("KMS2_PROVIDER"),
+        KMS2URL:       os.Getenv("KMS2_URL"),
+        KMS2KeyID:     os.Getenv("KMS2_KEY_ID"),
+        KMS2TenantID:  os.Getenv("KMS2_TENANT_ID"),
+        KMS2ClientID:  os.Getenv("KMS2_ACCESS_KEY_ID"),
+        KMS2SecretKey: os.Getenv("KMS2_SECRET_ACCESS_KEY"),
 
 		// Optional
 		MainStatusURL: os.Getenv("MAIN_STATUS_URL"),

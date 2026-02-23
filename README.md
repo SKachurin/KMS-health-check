@@ -80,7 +80,22 @@ Performs real wrap + unwrap validation across replicas.
 
 # Project Update Flow
 
-Since the remote uses HTTPS, `git pull` works even if inbound SSH (22) is later closed (because it uses outbound 443).
+Impossible after deployed in PROD - all passwords and SSH-keys are deleted.
+
+In test-mode:
+
+```
+cd /opt/kms-healthcheck
+
+git fetch --all
+git pull
+Serghuawei:~$ scp ~/KMS-health-check/.env root@<IP>:/opt/kms-healthcheck/.env
+docker compose down
+docker system prune -a
+docker compose --env-file .env up -d --build
+docker compose ps
+docker compose logs --tail=80 kms-healthcheck
+```
 
 ---
 
