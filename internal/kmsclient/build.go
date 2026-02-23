@@ -74,7 +74,7 @@ func buildSlot(ctx context.Context, slot string, provider string, cfg config.Con
 		}
 
 		// Require creds
-		if cfg.KMS2URL == "" || cfg.KMS2KeyID == "" || cfg.KMS2TenantID == "" || cfg.KMS2AccessKey == "" || cfg.KMS2SecretKey == "" {
+		if cfg.KMS2URL == "" || cfg.KMS2KeyID == "" || cfg.KMS2TenantID == "" || cfg.KMS2ClientID == "" || cfg.KMS2SecretKey == "" {
 			// Same choice: skip silently or error out
 			// return nil, errors.New("missing required Azure env vars for kms2")
 			return nil, nil
