@@ -76,6 +76,28 @@ Performs real wrap + unwrap validation across replicas.
 - `willfarrell/autoheal`
     - Enabled via label: `autoheal=true`
 
+### NB: create 2G swap for small ram (1 Gb)
+```
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+
+# persist
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+# verify
+swapon --show
+free -h
+```
+
+### Install Unattended Security Upgrades
+```
+sudo apt update
+sudo apt install unattended-upgrades
+sudo dpkg-reconfigure unattended-upgrades
+```
+
 ---
 
 # Project Update Flow
@@ -92,7 +114,7 @@ git pull
 Serghuawei:~$ scp ~/KMS-health-check/.env root@<IP>:/opt/kms-healthcheck/.env
 docker compose down
 docker system prune -a
-docker compose --env-file .env up -d --build
+docker compose --env-file .env up --build
 docker compose ps
 docker compose logs --tail=80 kms-healthcheck
 ```
