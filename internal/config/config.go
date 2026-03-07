@@ -23,6 +23,15 @@ type Config struct {
     KMS2TenantID  string
     KMS2ClientID  string // client_id
     KMS2SecretKey string // client_secret
+    // KMS #3 (Oracle)
+    KMS3Provider       string
+    KMS3CryptoEndpoint string
+    KMS3KeyID          string
+    KMS3UserOCID       string
+    KMS3TenancyOCID    string
+    KMS3Fingerprint    string
+    KMS3Region         string
+    KMS3PrivateKey     string
 	// --- Main app callbacks / status (optional) ---
 	MainStatusURL string
 	// --- Redis ---
@@ -62,6 +71,16 @@ func Load() Config {
         KMS2TenantID:  os.Getenv("KMS2_TENANT_ID"),
         KMS2ClientID:  os.Getenv("KMS2_ACCESS_KEY_ID"),
         KMS2SecretKey: os.Getenv("KMS2_SECRET_ACCESS_KEY"),
+
+		// KMS #3 (Oracle)
+        KMS3Provider:       os.Getenv("KMS3_PROVIDER"),
+        KMS3CryptoEndpoint: os.Getenv("KMS3_CRYPTO_ENDPOINT"),
+        KMS3KeyID:          os.Getenv("KMS3_KEY_ID"),
+        KMS3UserOCID:       os.Getenv("KMS3_USER_OCID"),
+        KMS3TenancyOCID:    os.Getenv("KMS3_TENANCY_OCID"),
+        KMS3Fingerprint:    os.Getenv("KMS3_FINGERPRINT"),
+        KMS3Region:         os.Getenv("KMS3_REGION"),
+        KMS3PrivateKey:     os.Getenv("KMS3_PRIVATE_KEY"),
 
 		// Optional
 		MainStatusURL: os.Getenv("MAIN_STATUS_URL"),

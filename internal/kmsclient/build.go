@@ -31,6 +31,15 @@ func BuildAll(cfg config.Config) (map[string]Client, error) {
 		clients["kms2"] = c2
 	}
 
+	// kms3
+	c3, err := buildSlot(context.Background(), "kms3", cfg.KMS3Provider, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kms3: %w", err)
+	}
+	if c3 != nil {
+		clients["kms3"] = c3
+	}
+
 	return clients, nil
 }
 
@@ -43,15 +52,13 @@ func buildSlot(ctx context.Context, slot string, provider string, cfg config.Con
 
 	switch slot {
 	case "kms1":
-		// Slot 1 supports AWS in your scheme
+		// Slot 1 supports AWS
 		if p != "AWS" {
 			return nil, nil
 		}
 
 		// Require creds
 		if cfg.KMS1Region == "" || cfg.KMS1KeyID == "" || cfg.KMS1AccessKey == "" || cfg.KMS1SecretKey == "" {
-			// You can return an error instead if you want to fail fast:
-			// return nil, errors.New("missing required AWS env vars for kms1")
 			return nil, nil
 		}
 
@@ -68,15 +75,13 @@ func buildSlot(ctx context.Context, slot string, provider string, cfg config.Con
 		)
 
 	case "kms2":
-		// Slot 2 supports AZURE in your scheme
+		// Slot 2 supports AZURE
 		if p != "AZURE" {
 			return nil, nil
 		}
 
 		// Require creds
 		if cfg.KMS2URL == "" || cfg.KMS2KeyID == "" || cfg.KMS2TenantID == "" || cfg.KMS2ClientID == "" || cfg.KMS2SecretKey == "" {
-			// Same choice: skip silently or error out
-			// return nil, errors.New("missing required Azure env vars for kms2")
 			return nil, nil
 		}
 
@@ -88,6 +93,33 @@ func buildSlot(ctx context.Context, slot string, provider string, cfg config.Con
 			cfg.KMS2ClientID,  // client_id
 			cfg.KMS2SecretKey,  // client_secret
 		)
+
+    	case "kms3":
+    		// Slot 3 supports ORACLE
+    		if p != "ORACLE" && p != "OCI" {
+    			return nil, nil
+    		}
+
+    		if cfg.KMS3CryptoEndpoint == "" ||
+                    cfg.KMS3KeyID == "" ||
+                    cfg.KMS3UserOCID == "" ||
+                    cfg.KMS3TenancyOCID == "" ||
+                    cfg.KMS3Fingerprint == "" ||
+                    cfg.KMS3Region == "" ||
+                    cfg.KMS3PrivateKey == "" {
+                    return nil, nil
+            }
+
+            return NewOracle(
+                ctx,
+                cfg.KMS3CryptoEndpoint,
+                cfg.KMS3KeyID,
+                cfg.KMS3TenancyOCID,
+                cfg.KMS3UserOCID,
+                cfg.KMS3Region,
+                cfg.KMS3Fingerprint,
+                cfg.KMS3PrivateKey,
+            )
 
 	default:
 		return nil, errors.New("unknown slot: " + slot)
