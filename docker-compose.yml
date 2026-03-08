@@ -43,7 +43,7 @@ services:
       LOCK_TTL: "${LOCK_TTL:-5m}"
       NONCE_TTL: "${NONCE_TTL:-5m}"
       HEALTH_INTERVAL: "${HEALTH_INTERVAL:-15s}"
-      REQ_TIMEOUT: "${REQ_TIMEOUT:-2s}"
+      REQ_TIMEOUT: "${REQ_TIMEOUT:-6s}"
       SIG_SKEW: "${SIG_SKEW:-60s}"
 
     depends_on:
