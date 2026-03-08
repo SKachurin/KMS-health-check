@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/keymanagement"
