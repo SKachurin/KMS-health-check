@@ -27,6 +27,10 @@ func NewOracle(
 ) (Client, error) {
     _ = ctx
 
+    privateKey = strings.TrimSpace(privateKey)
+	privateKey = strings.Trim(privateKey, `"`)
+	privateKey = strings.ReplaceAll(privateKey, `\n`, "\n")
+
     provider := common.NewRawConfigurationProvider(
         tenancyOCID,
         userOCID,

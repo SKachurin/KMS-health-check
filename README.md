@@ -111,7 +111,7 @@ cd /opt/kms-healthcheck
 
 git fetch --all
 git pull
-Serghuawei:~$ scp ~/KMS-health-check/.env root@<IP>:/opt/kms-healthcheck/.env
+  Serghuawei:~$ scp ~/KMS-health-check/.env root@<IP>:/opt/kms-healthcheck/.env
 docker compose down
 docker system prune -a
 docker compose --env-file .env up -d --build
